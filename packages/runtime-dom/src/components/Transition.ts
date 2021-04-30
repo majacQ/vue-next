@@ -3,7 +3,9 @@ import {
   BaseTransitionProps,
   h,
   warn,
-  FunctionalComponent
+  FunctionalComponent,
+  compatUtils,
+  DeprecationTypes
 } from '@vue/runtime-core'
 import { isObject, toNumber, extend } from '@vue/shared'
 
@@ -27,6 +29,14 @@ export interface TransitionProps extends BaseTransitionProps<Element> {
   leaveToClass?: string
 }
 
+export interface ElementWithTransition extends HTMLElement {
+  // _vtc = Vue Transition Classes.
+  // Store the temporarily-added transition classes on the element
+  // so that we can avoid overwriting them if the element's class is patched
+  // during the transition.
+  _vtc?: Set<string>
+}
+
 // DOM Transition is a higher-order-component based on the platform-agnostic
 // base Transition component, with DOM-specific logic.
 export const Transition: FunctionalComponent<TransitionProps> = (
@@ -35,6 +45,10 @@ export const Transition: FunctionalComponent<TransitionProps> = (
 ) => h(BaseTransition, resolveTransitionProps(props), slots)
 
 Transition.displayName = 'Transition'
+
+if (__COMPAT__) {
+  Transition.__isBuiltIn = true
+}
 
 const DOMTransitionPropsValidators = {
   name: String,
@@ -64,10 +78,20 @@ export const TransitionPropsValidators = (Transition.props = /*#__PURE__*/ exten
 export function resolveTransitionProps(
   rawProps: TransitionProps
 ): BaseTransitionProps<Element> {
-  let {
+  const baseProps: BaseTransitionProps<Element> = {}
+  for (const key in rawProps) {
+    if (!(key in DOMTransitionPropsValidators)) {
+      ;(baseProps as any)[key] = (rawProps as any)[key]
+    }
+  }
+
+  if (rawProps.css === false) {
+    return baseProps
+  }
+
+  const {
     name = 'v',
     type,
-    css = true,
     duration,
     enterFromClass = `${name}-enter-from`,
     enterActiveClass = `${name}-enter-active`,
@@ -80,15 +104,24 @@ export function resolveTransitionProps(
     leaveToClass = `${name}-leave-to`
   } = rawProps
 
-  const baseProps: BaseTransitionProps<Element> = {}
-  for (const key in rawProps) {
-    if (!(key in DOMTransitionPropsValidators)) {
-      ;(baseProps as any)[key] = (rawProps as any)[key]
+  // legacy transition class compat
+  const legacyClassEnabled =
+    __COMPAT__ &&
+    compatUtils.isCompatEnabled(DeprecationTypes.TRANSITION_CLASSES, null)
+  let legacyEnterFromClass: string
+  let legacyAppearFromClass: string
+  let legacyLeaveFromClass: string
+  if (__COMPAT__ && legacyClassEnabled) {
+    const toLegacyClass = (cls: string) => cls.replace(/-from$/, '')
+    if (!rawProps.enterFromClass) {
+      legacyEnterFromClass = toLegacyClass(enterFromClass)
     }
-  }
-
-  if (!css) {
-    return baseProps
+    if (!rawProps.appearFromClass) {
+      legacyAppearFromClass = toLegacyClass(appearFromClass)
+    }
+    if (!rawProps.leaveFromClass) {
+      legacyLeaveFromClass = toLegacyClass(leaveFromClass)
+    }
   }
 
   const durations = normalizeDuration(duration)
@@ -124,13 +157,15 @@ export function resolveTransitionProps(
       hook && hook(el, resolve)
       nextFrame(() => {
         removeTransitionClass(el, isAppear ? appearFromClass : enterFromClass)
+        if (__COMPAT__ && legacyClassEnabled) {
+          removeTransitionClass(
+            el,
+            isAppear ? legacyAppearFromClass : legacyEnterFromClass
+          )
+        }
         addTransitionClass(el, isAppear ? appearToClass : enterToClass)
         if (!(hook && hook.length > 1)) {
-          if (enterDuration) {
-            setTimeout(resolve, enterDuration)
-          } else {
-            whenTransitionEnds(el, type, resolve)
-          }
+          whenTransitionEnds(el, type, enterDuration, resolve)
         }
       })
     }
@@ -139,29 +174,39 @@ export function resolveTransitionProps(
   return extend(baseProps, {
     onBeforeEnter(el) {
       onBeforeEnter && onBeforeEnter(el)
-      addTransitionClass(el, enterActiveClass)
       addTransitionClass(el, enterFromClass)
+      if (__COMPAT__ && legacyClassEnabled) {
+        addTransitionClass(el, legacyEnterFromClass)
+      }
+      addTransitionClass(el, enterActiveClass)
     },
     onBeforeAppear(el) {
       onBeforeAppear && onBeforeAppear(el)
-      addTransitionClass(el, appearActiveClass)
       addTransitionClass(el, appearFromClass)
+      if (__COMPAT__ && legacyClassEnabled) {
+        addTransitionClass(el, legacyAppearFromClass)
+      }
+      addTransitionClass(el, appearActiveClass)
     },
     onEnter: makeEnterHook(false),
     onAppear: makeEnterHook(true),
     onLeave(el, done) {
       const resolve = () => finishLeave(el, done)
-      addTransitionClass(el, leaveActiveClass)
       addTransitionClass(el, leaveFromClass)
+      if (__COMPAT__ && legacyClassEnabled) {
+        addTransitionClass(el, legacyLeaveFromClass)
+      }
+      // force reflow so *-leave-from classes immediately take effect (#2593)
+      forceReflow()
+      addTransitionClass(el, leaveActiveClass)
       nextFrame(() => {
         removeTransitionClass(el, leaveFromClass)
+        if (__COMPAT__ && legacyClassEnabled) {
+          removeTransitionClass(el, legacyLeaveFromClass)
+        }
         addTransitionClass(el, leaveToClass)
         if (!(onLeave && onLeave.length > 1)) {
-          if (leaveDuration) {
-            setTimeout(resolve, leaveDuration)
-          } else {
-            whenTransitionEnds(el, type, resolve)
-          }
+          whenTransitionEnds(el, type, leaveDuration, resolve)
         }
       })
       onLeave && onLeave(el, resolve)
@@ -214,14 +259,6 @@ function validateDuration(val: unknown) {
   }
 }
 
-export interface ElementWithTransition extends HTMLElement {
-  // _vtc = Vue Transition Classes.
-  // Store the temporarily-added transition classes on the element
-  // so that we can avoid overwriting them if the element's class is patched
-  // during the transition.
-  _vtc?: Set<string>
-}
-
 export function addTransitionClass(el: Element, cls: string) {
   cls.split(/\s+/).forEach(c => c && el.classList.add(c))
   ;(
@@ -247,27 +284,39 @@ function nextFrame(cb: () => void) {
   })
 }
 
+let endId = 0
+
 function whenTransitionEnds(
-  el: Element,
+  el: Element & { _endId?: number },
   expectedType: TransitionProps['type'] | undefined,
-  cb: () => void
+  explicitTimeout: number | null,
+  resolve: () => void
 ) {
+  const id = (el._endId = ++endId)
+  const resolveIfNotStale = () => {
+    if (id === el._endId) {
+      resolve()
+    }
+  }
+
+  if (explicitTimeout) {
+    return setTimeout(resolveIfNotStale, explicitTimeout)
+  }
+
   const { type, timeout, propCount } = getTransitionInfo(el, expectedType)
   if (!type) {
-    return cb()
+    return resolve()
   }
 
   const endEvent = type + 'end'
   let ended = 0
   const end = () => {
     el.removeEventListener(endEvent, onEnd)
-    cb()
+    resolveIfNotStale()
   }
   const onEnd = (e: Event) => {
-    if (e.target === el) {
-      if (++ended >= propCount) {
-        end()
-      }
+    if (e.target === el && ++ended >= propCount) {
+      end()
     }
   }
   setTimeout(() => {
@@ -353,4 +402,9 @@ function getTimeout(delays: string[], durations: string[]): number {
 // (i.e. acting as a floor function) causing unexpected behaviors
 function toMs(s: string): number {
   return Number(s.slice(0, -1).replace(',', '.')) * 1000
+}
+
+// synchronously force layout to put elements into a certain state
+export function forceReflow() {
+  return document.body.offsetHeight
 }

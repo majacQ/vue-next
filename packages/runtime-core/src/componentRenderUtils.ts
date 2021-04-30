@@ -1,7 +1,8 @@
 import {
   ComponentInternalInstance,
   FunctionalComponent,
-  Data
+  Data,
+  getComponentName
 } from './component'
 import {
   VNode,
@@ -9,9 +10,9 @@ import {
   createVNode,
   Comment,
   cloneVNode,
-  Fragment,
   VNodeArrayChildren,
-  isVNode
+  isVNode,
+  blockStack
 } from './vnode'
 import { handleError, ErrorCodes } from './errorHandling'
 import { PatchFlags, ShapeFlags, isOn, isModelListener } from '@vue/shared'
@@ -19,20 +20,18 @@ import { warn } from './warning'
 import { isHmrUpdating } from './hmr'
 import { NormalizedProps } from './componentProps'
 import { isEmitListener } from './componentEmits'
+import { setCurrentRenderingInstance } from './componentRenderContext'
+import {
+  DeprecationTypes,
+  isCompatEnabled,
+  warnDeprecation
+} from './compat/compatConfig'
 
-// mark the current rendering instance for asset resolution (e.g.
-// resolveComponent, resolveDirective) during render
-export let currentRenderingInstance: ComponentInternalInstance | null = null
-
-export function setCurrentRenderingInstance(
-  instance: ComponentInternalInstance | null
-) {
-  currentRenderingInstance = instance
-}
-
-// dev only flag to track whether $attrs was used during render.
-// If $attrs was used during render then the warning for failed attrs
-// fallthrough can be suppressed.
+/**
+ * dev only flag to track whether $attrs was used during render.
+ * If $attrs was used during render then the warning for failed attrs
+ * fallthrough can be suppressed.
+ */
 let accessedAttrs: boolean = false
 
 export function markAttrsAccessed() {
@@ -60,7 +59,7 @@ export function renderComponentRoot(
   } = instance
 
   let result
-  currentRenderingInstance = instance
+  const prev = setCurrentRenderingInstance(instance)
   if (__DEV__) {
     accessedAttrs = false
   }
@@ -95,7 +94,6 @@ export function renderComponentRoot(
               props,
               __DEV__
                 ? {
-                    props,
                     get attrs() {
                       markAttrsAccessed()
                       return attrs
@@ -103,7 +101,7 @@ export function renderComponentRoot(
                     slots,
                     emit
                   }
-                : { props, attrs, slots, emit }
+                : { attrs, slots, emit }
             )
           : render(props, null as any /* we know it doesn't need it */)
       )
@@ -117,11 +115,15 @@ export function renderComponentRoot(
     // to have comments along side the root element which makes it a fragment
     let root = result
     let setRoot: ((root: VNode) => void) | undefined = undefined
-    if (__DEV__) {
+    if (
+      __DEV__ &&
+      result.patchFlag > 0 &&
+      result.patchFlag & PatchFlags.DEV_ROOT_FRAGMENT
+    ) {
       ;[root, setRoot] = getChildRoot(result)
     }
 
-    if (Component.inheritAttrs !== false && fallthroughAttrs) {
+    if (fallthroughAttrs && Component.inheritAttrs !== false) {
       const keys = Object.keys(fallthroughAttrs)
       const { shapeFlag } = root
       if (keys.length) {
@@ -179,6 +181,29 @@ export function renderComponentRoot(
       }
     }
 
+    if (
+      __COMPAT__ &&
+      isCompatEnabled(DeprecationTypes.INSTANCE_ATTRS_CLASS_STYLE, instance) &&
+      vnode.shapeFlag & ShapeFlags.STATEFUL_COMPONENT &&
+      (root.shapeFlag & ShapeFlags.ELEMENT ||
+        root.shapeFlag & ShapeFlags.COMPONENT)
+    ) {
+      const { class: cls, style } = vnode.props || {}
+      if (cls || style) {
+        if (__DEV__ && Component.inheritAttrs === false) {
+          warnDeprecation(
+            DeprecationTypes.INSTANCE_ATTRS_CLASS_STYLE,
+            instance,
+            getComponentName(instance.type)
+          )
+        }
+        root = cloneVNode(root, {
+          class: cls,
+          style: style
+        })
+      }
+    }
+
     // inherit directives
     if (vnode.dirs) {
       if (__DEV__ && !isElementRoot(root)) {
@@ -206,11 +231,12 @@ export function renderComponentRoot(
       result = root
     }
   } catch (err) {
+    blockStack.length = 0
     handleError(err, instance, ErrorCodes.RENDER_FUNCTION)
     result = createVNode(Comment)
   }
-  currentRenderingInstance = null
 
+  setCurrentRenderingInstance(prev)
   return result
 }
 
@@ -223,9 +249,6 @@ export function renderComponentRoot(
 const getChildRoot = (
   vnode: VNode
 ): [VNode, ((root: VNode) => void) | undefined] => {
-  if (vnode.type !== Fragment) {
-    return [vnode, undefined]
-  }
   const rawChildren = vnode.children as VNodeArrayChildren
   const dynamicChildren = vnode.dynamicChildren
   const childRoot = filterSingleRoot(rawChildren)
@@ -247,18 +270,27 @@ const getChildRoot = (
   return [normalizeVNode(childRoot), setRoot]
 }
 
-/**
- * dev only
- */
-export function filterSingleRoot(children: VNodeArrayChildren): VNode | null {
-  const filtered = children.filter(child => {
-    return !(
-      isVNode(child) &&
-      child.type === Comment &&
-      child.children !== 'v-if'
-    )
-  })
-  return filtered.length === 1 && isVNode(filtered[0]) ? filtered[0] : null
+export function filterSingleRoot(
+  children: VNodeArrayChildren
+): VNode | undefined {
+  let singleRoot
+  for (let i = 0; i < children.length; i++) {
+    const child = children[i]
+    if (isVNode(child)) {
+      // ignore user comment
+      if (child.type !== Comment || child.children === 'v-if') {
+        if (singleRoot) {
+          // has more than 1 non-comment child, return now
+          return
+        } else {
+          singleRoot = child
+        }
+      }
+    } else {
+      return
+    }
+  }
+  return singleRoot
 }
 
 const getFunctionalFallthrough = (attrs: Data): Data | undefined => {

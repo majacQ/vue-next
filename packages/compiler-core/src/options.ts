@@ -6,9 +6,17 @@ import {
   DirectiveTransform,
   TransformContext
 } from './transform'
+import { CompilerCompatOptions } from './compat/compatConfig'
 import { ParserPlugin } from '@babel/parser'
 
-export interface ParserOptions {
+export interface ErrorHandlingOptions {
+  onWarn?: (warning: CompilerError) => void
+  onError?: (error: CompilerError) => void
+}
+
+export interface ParserOptions
+  extends ErrorHandlingOptions,
+    CompilerCompatOptions {
   /**
    * e.g. platform native elements, e.g. `<div>` for browsers
    */
@@ -45,10 +53,13 @@ export interface ParserOptions {
    */
   delimiters?: [string, string]
   /**
+   * Whitespace handling strategy
+   */
+  whitespace?: 'preserve' | 'condense'
+  /**
    * Only needed for DOM compilers
    */
   decodeEntities?: (rawText: string, asAttr: boolean) => string
-  onError?: (error: CompilerError) => void
   /**
    * Keep comments in the templates AST, even in production
    */
@@ -62,15 +73,42 @@ export type HoistTransform = (
 ) => void
 
 export const enum BindingTypes {
+  /**
+   * returned from data()
+   */
   DATA = 'data',
+  /**
+   * decalred as a prop
+   */
   PROPS = 'props',
-  SETUP = 'setup',
-  CONST = 'const',
+  /**
+   * a let binding (may or may not be a ref)
+   */
+  SETUP_LET = 'setup-let',
+  /**
+   * a const binding that can never be a ref.
+   * these bindings don't need `unref()` calls when processed in inlined
+   * template expressions.
+   */
+  SETUP_CONST = 'setup-const',
+  /**
+   * a const binding that may be a ref.
+   */
+  SETUP_MAYBE_REF = 'setup-maybe-ref',
+  /**
+   * bindings that are guaranteed to be refs
+   */
+  SETUP_REF = 'setup-ref',
+  /**
+   * declared by other options, e.g. computed, inject
+   */
   OPTIONS = 'options'
 }
 
-export interface BindingMetadata {
-  [key: string]: BindingTypes
+export type BindingMetadata = {
+  [key: string]: BindingTypes | undefined
+} & {
+  __isScriptSetup?: boolean
 }
 
 interface SharedTransformCodegenOptions {
@@ -99,9 +137,22 @@ interface SharedTransformCodegenOptions {
    * This allows the function to directly access setup() local bindings.
    */
   inline?: boolean
+  /**
+   * Indicates that transforms and codegen should try to output valid TS code
+   */
+  isTS?: boolean
+  /**
+   * Filename for source map generation.
+   * Also used for self-recursive reference in templates
+   * @default 'template.vue.html'
+   */
+  filename?: string
 }
 
-export interface TransformOptions extends SharedTransformCodegenOptions {
+export interface TransformOptions
+  extends SharedTransformCodegenOptions,
+    ErrorHandlingOptions,
+    CompilerCompatOptions {
   /**
    * An array of node transforms to be applied to every AST node.
    */
@@ -165,11 +216,17 @@ export interface TransformOptions extends SharedTransformCodegenOptions {
    */
   scopeId?: string | null
   /**
+   * Indicates this SFC template has used :slotted in its styles
+   * Defaults to `true` for backwards compatibility - SFC tooling should set it
+   * to `false` if no `:slotted` usage is detected in `<style>`
+   */
+  slotted?: boolean
+  /**
    * SFC `<style vars>` injection string
+   * Should already be an object expression, e.g. `{ 'xxxx-color': color }`
    * needed to render inline CSS variables on component root
    */
   ssrCssVars?: string
-  onError?: (error: CompilerError) => void
 }
 
 export interface CodegenOptions extends SharedTransformCodegenOptions {
@@ -188,11 +245,6 @@ export interface CodegenOptions extends SharedTransformCodegenOptions {
    * @default false
    */
   sourceMap?: boolean
-  /**
-   * Filename for source map generation.
-   * @default 'template.vue.html'
-   */
-  filename?: string
   /**
    * SFC scoped styles ID
    */

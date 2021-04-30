@@ -79,7 +79,12 @@ export const transformOn: DirectiveTransform = (
     // process the expression since it's been skipped
     if (!__BROWSER__ && context.prefixIdentifiers) {
       isInlineStatement && context.addIdentifiers(`$event`)
-      exp = processExpression(exp, context, false, hasMultipleStatements)
+      exp = dir.exp = processExpression(
+        exp,
+        context,
+        false,
+        hasMultipleStatements
+      )
       isInlineStatement && context.removeIdentifiers(`$event`)
       // with scope analysis, the function is hoistable if it has no reference
       // to scope variables.
@@ -87,7 +92,7 @@ export const transformOn: DirectiveTransform = (
         context.cacheHandlers &&
         // runtime constants don't need to be cached
         // (this is analyzed by compileScript in SFC <script setup>)
-        !(exp.type === NodeTypes.SIMPLE_EXPRESSION && exp.isRuntimeConstant) &&
+        !(exp.type === NodeTypes.SIMPLE_EXPRESSION && exp.constType > 0) &&
         // #1541 bail if this is a member exp handler passed to a component -
         // we need to use the original function to preserve arity,
         // e.g. <transition> relies on checking cb.length to determine
@@ -103,9 +108,9 @@ export const transformOn: DirectiveTransform = (
       // avoiding the need to be patched.
       if (shouldCache && isMemberExp) {
         if (exp.type === NodeTypes.SIMPLE_EXPRESSION) {
-          exp.content += `(...args)`
+          exp.content = `${exp.content} && ${exp.content}(...args)`
         } else {
-          exp.children.push(`(...args)`)
+          exp.children = [...exp.children, ` && `, ...exp.children, `(...args)`]
         }
       }
     }
@@ -122,9 +127,15 @@ export const transformOn: DirectiveTransform = (
     if (isInlineStatement || (shouldCache && isMemberExp)) {
       // wrap inline statement in a function expression
       exp = createCompoundExpression([
-        `${isInlineStatement ? `$event` : `(...args)`} => ${
-          hasMultipleStatements ? `{` : `(`
-        }`,
+        `${
+          isInlineStatement
+            ? !__BROWSER__ && context.isTS
+              ? `($event: any)`
+              : `$event`
+            : `${
+                !__BROWSER__ && context.isTS ? `\n//@ts-ignore\n` : ``
+              }(...args)`
+        } => ${hasMultipleStatements ? `{` : `(`}`,
         exp,
         hasMultipleStatements ? `}` : `)`
       ])

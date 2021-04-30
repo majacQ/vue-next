@@ -50,11 +50,13 @@ import {
   CREATE_BLOCK,
   OPEN_BLOCK,
   CREATE_STATIC,
-  WITH_CTX
+  WITH_CTX,
+  RESOLVE_FILTER
 } from './runtimeHelpers'
 import { ImportItem } from './transform'
 
 const PURE_ANNOTATION = `/*#__PURE__*/`
+const WITH_ID = `_withId`
 
 type CodegenNode = TemplateChildNode | JSChildNode | SSRCodegenNode
 
@@ -66,7 +68,10 @@ export interface CodegenResult {
 }
 
 export interface CodegenContext
-  extends Omit<Required<CodegenOptions>, 'bindingMetadata' | 'inline'> {
+  extends Omit<
+      Required<CodegenOptions>,
+      'bindingMetadata' | 'inline' | 'isTS'
+    > {
   source: string
   code: string
   line: number
@@ -197,10 +202,11 @@ export function generate(
     scopeId,
     ssr
   } = context
+
   const hasHelpers = ast.helpers.length > 0
   const useWithBlock = !prefixIdentifiers && mode !== 'module'
   const genScopeId = !__BROWSER__ && scopeId != null && mode === 'module'
-  const isSetupInlined = !!options.inline
+  const isSetupInlined = !__BROWSER__ && !!options.inline
 
   // preambles
   // in setup() inline mode, the preamble is generated in a sub context
@@ -214,28 +220,29 @@ export function generate(
     genFunctionPreamble(ast, preambleContext)
   }
 
-  // binding optimizations
-  const optimizeSources = options.bindingMetadata
-    ? `, $props, $setup, $data, $options`
-    : ``
   // enter render function
-  if (!ssr) {
-    if (isSetupInlined) {
-      if (genScopeId) {
-        push(`${PURE_ANNOTATION}_withId(`)
-      }
-      push(`(_ctx, _cache${optimizeSources}) => {`)
-    } else {
-      if (genScopeId) {
-        push(`const render = ${PURE_ANNOTATION}_withId(`)
-      }
-      push(`function render(_ctx, _cache${optimizeSources}) {`)
-    }
+  const functionName = ssr ? `ssrRender` : `render`
+  const args = ssr ? ['_ctx', '_push', '_parent', '_attrs'] : ['_ctx', '_cache']
+  if (!__BROWSER__ && options.bindingMetadata && !options.inline) {
+    // binding optimization args
+    args.push('$props', '$setup', '$data', '$options')
+  }
+  const signature =
+    !__BROWSER__ && options.isTS
+      ? args.map(arg => `${arg}: any`).join(',')
+      : args.join(', ')
+
+  if (genScopeId && !isSetupInlined) {
+    // root-level _withId wrapping is no longer necessary after 3.0.8 and is
+    // a noop, it's only kept so that code compiled with 3.0.8+ can run with
+    // runtime < 3.0.8.
+    // TODO: consider removing in 3.1
+    push(`const ${functionName} = ${PURE_ANNOTATION}${WITH_ID}(`)
+  }
+  if (isSetupInlined || genScopeId) {
+    push(`(${signature}) => {`)
   } else {
-    if (genScopeId) {
-      push(`const ssrRender = ${PURE_ANNOTATION}_withId(`)
-    }
-    push(`function ssrRender(_ctx, _push, _parent, _attrs${optimizeSources}) {`)
+    push(`function ${functionName}(${signature}) {`)
   }
   indent()
 
@@ -268,6 +275,12 @@ export function generate(
       newline()
     }
   }
+  if (__COMPAT__ && ast.filters && ast.filters.length) {
+    newline()
+    genAssets(ast.filters, 'filter', context)
+    newline()
+  }
+
   if (ast.temps > 0) {
     push(`let `)
     for (let i = 0; i < ast.temps; i++) {
@@ -297,7 +310,7 @@ export function generate(
   deindent()
   push(`}`)
 
-  if (genScopeId) {
+  if (genScopeId && !isSetupInlined) {
     push(`)`)
   }
 
@@ -376,11 +389,11 @@ function genModulePreamble(
 ) {
   const {
     push,
-    helper,
     newline,
-    scopeId,
     optimizeImports,
-    runtimeModuleName
+    runtimeModuleName,
+    scopeId,
+    helper
   } = context
 
   if (genScopeId) {
@@ -430,9 +443,14 @@ function genModulePreamble(
     newline()
   }
 
+  // we technically don't need this anymore since `withCtx` already sets the
+  // correct scopeId, but this is necessary for backwards compat
+  // TODO: consider removing in 3.1
   if (genScopeId) {
     push(
-      `const _withId = ${PURE_ANNOTATION}${helper(WITH_SCOPE_ID)}("${scopeId}")`
+      `const ${WITH_ID} = ${PURE_ANNOTATION}${helper(
+        WITH_SCOPE_ID
+      )}("${scopeId}")`
     )
     newline()
   }
@@ -447,16 +465,27 @@ function genModulePreamble(
 
 function genAssets(
   assets: string[],
-  type: 'component' | 'directive',
+  type: 'component' | 'directive' | 'filter',
   { helper, push, newline }: CodegenContext
 ) {
   const resolver = helper(
-    type === 'component' ? RESOLVE_COMPONENT : RESOLVE_DIRECTIVE
+    __COMPAT__ && type === 'filter'
+      ? RESOLVE_FILTER
+      : type === 'component'
+        ? RESOLVE_COMPONENT
+        : RESOLVE_DIRECTIVE
   )
   for (let i = 0; i < assets.length; i++) {
-    const id = assets[i]
+    let id = assets[i]
+    // potential component implicit self-reference inferred from SFC filename
+    const maybeSelfReference = id.endsWith('__self')
+    if (maybeSelfReference) {
+      id = id.slice(0, -6)
+    }
     push(
-      `const ${toValidAssetId(id, type)} = ${resolver}(${JSON.stringify(id)})`
+      `const ${toValidAssetId(id, type)} = ${resolver}(${JSON.stringify(id)}${
+        maybeSelfReference ? `, true` : ``
+      })`
     )
     if (i < assets.length - 1) {
       newline()
@@ -709,13 +738,11 @@ function genExpressionAsPropertyKey(
 }
 
 function genComment(node: CommentNode, context: CodegenContext) {
-  if (__DEV__) {
-    const { push, helper, pure } = context
-    if (pure) {
-      push(PURE_ANNOTATION)
-    }
-    push(`${helper(CREATE_COMMENT)}(${JSON.stringify(node.content)})`, node)
+  const { push, helper, pure } = context
+  if (pure) {
+    push(PURE_ANNOTATION)
   }
+  push(`${helper(CREATE_COMMENT)}(${JSON.stringify(node.content)})`, node)
 }
 
 function genVNodeCall(node: VNodeCall, context: CodegenContext) {
@@ -819,10 +846,9 @@ function genFunctionExpression(
   const genScopeId =
     !__BROWSER__ && isSlot && scopeId != null && mode !== 'function'
 
-  if (genScopeId) {
-    push(`_withId(`)
-  } else if (isSlot) {
-    push(`_${helperNameMap[WITH_CTX]}(`)
+  if (isSlot) {
+    // wrap slot functions with owner context
+    push(genScopeId ? `${WITH_ID}(` : `_${helperNameMap[WITH_CTX]}(`)
   }
   push(`(`, node)
   if (isArray(params)) {
@@ -851,7 +877,7 @@ function genFunctionExpression(
     deindent()
     push(`}`)
   }
-  if (genScopeId || isSlot) {
+  if (isSlot) {
     push(`)`)
   }
 }
