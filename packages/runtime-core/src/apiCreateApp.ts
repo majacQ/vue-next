@@ -74,7 +74,16 @@ export interface AppContext {
   components: Record<string, Component>
   directives: Record<string, Directive>
   provides: Record<string | symbol, any>
-  reload?: () => void // HMR only
+  /**
+   * Flag for de-optimizing props normalization
+   * @internal
+   */
+  deopt?: boolean
+  /**
+   * HMR only
+   * @internal
+   */
+  reload?: () => void
 }
 
 type PluginInstallFunction = (app: App, ...options: any[]) => any
@@ -91,7 +100,7 @@ export function createAppContext(): AppContext {
     config: {
       isNativeTag: NO,
       performance: false,
-      globalProperties: {},
+      globalProperties: __DEV__ ? createGlobalPropertiesProxy() : {},
       optionMergeStrategies: {},
       isCustomElement: NO,
       errorHandler: undefined,
@@ -169,6 +178,11 @@ export function createAppAPI<HostElement>(
         if (__FEATURE_OPTIONS_API__) {
           if (!context.mixins.includes(mixin)) {
             context.mixins.push(mixin)
+            // global mixin with props/emits de-optimizes props/emits
+            // normalization caching.
+            if (mixin.props || mixin.emits) {
+              context.deopt = true
+            }
           } else if (__DEV__) {
             warn(
               'Mixin has already been applied to target app' +
@@ -280,4 +294,26 @@ export function createAppAPI<HostElement>(
 
     return app
   }
+}
+
+// dev only
+function createGlobalPropertiesProxy() {
+  const protectedPropertyNames = ['_'] as Array<string | number | symbol>
+  return new Proxy({} as Record<string, any>, {
+    get(target, key, receiver) {
+      return Reflect.get(target, key, receiver)
+    },
+    set(target, key, value: any, receiver) {
+      if (protectedPropertyNames.includes(key)) {
+        warn(
+          `Property '${String(
+            key
+          )}' can't be set on \`app.config.globalProperties\` as it is a reserved name.
+          Please use another name for this globalProperty entry`
+        )
+        return false
+      }
+      return Reflect.set(target, key, value, receiver)
+    }
+  })
 }

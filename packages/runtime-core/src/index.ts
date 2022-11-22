@@ -94,6 +94,7 @@ export {
   setTransitionHooks,
   getTransitionRawChildren
 } from './components/BaseTransition'
+export { initCustomFormatter } from './customFormatter'
 
 // For devtools
 export { devtools, setDevtoolsHook } from './devtools'
@@ -240,7 +241,12 @@ export {
   createCommentVNode,
   createStaticVNode
 } from './vnode'
-export { toDisplayString, camelize, capitalize } from '@vue/shared'
+export {
+  toDisplayString,
+  camelize,
+  capitalize,
+  toHandlerKey
+} from '@vue/shared'
 
 // For test-utils
 export { transformVNodeArgs } from './vnode'

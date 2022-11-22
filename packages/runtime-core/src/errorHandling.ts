@@ -113,7 +113,9 @@ export function handleError(
       const errorCapturedHooks = cur.ec
       if (errorCapturedHooks) {
         for (let i = 0; i < errorCapturedHooks.length; i++) {
-          if (errorCapturedHooks[i](err, exposedInstance, errorInfo)) {
+          if (
+            errorCapturedHooks[i](err, exposedInstance, errorInfo) === false
+          ) {
             return
           }
         }
@@ -153,7 +155,7 @@ function logError(
     // crash in dev by default so it's more noticeable
     if (throwInDev) {
       throw err
-    } else {
+    } else if (!__TEST__) {
       console.error(err)
     }
   } else {

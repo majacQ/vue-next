@@ -31,9 +31,9 @@ export type PublicProps = VNodeProps &
   ComponentCustomProps
 
 export type DefineComponent<
-  PropsOrPropOptions = any,
-  RawBindings = any,
-  D = any,
+  PropsOrPropOptions = {},
+  RawBindings = {},
+  D = {},
   C extends ComputedOptions = ComputedOptions,
   M extends MethodOptions = MethodOptions,
   Mixin extends ComponentOptionsMixin = ComponentOptionsMixin,
@@ -94,8 +94,8 @@ export function defineComponent<
   Props = {},
   RawBindings = {},
   D = {},
-  C extends ComputedOptions = ComputedOptions,
-  M extends MethodOptions = MethodOptions,
+  C extends ComputedOptions = {},
+  M extends MethodOptions = {},
   Mixin extends ComponentOptionsMixin = ComponentOptionsMixin,
   Extends extends ComponentOptionsMixin = ComponentOptionsMixin,
   E extends EmitsOptions = EmitsOptions,

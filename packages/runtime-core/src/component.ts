@@ -66,7 +66,7 @@ export type Data = Record<string, unknown>
 export interface ComponentCustomProps {}
 
 /**
- * Default allowed non-declared props on ocmponent in TSX
+ * Default allowed non-declared props on component in TSX
  */
 export interface AllowedComponentProps {
   class?: unknown
@@ -79,11 +79,11 @@ export interface ComponentInternalOptions {
   /**
    * @internal
    */
-  __props?: Record<number, NormalizedPropsOptions>
+  __props?: NormalizedPropsOptions
   /**
    * @internal
    */
-  __emits?: Record<number, ObjectEmitsOptions | null>
+  __emits?: ObjectEmitsOptions | null
   /**
    * @internal
    */
@@ -553,7 +553,7 @@ function setupStatefulComponent(
     }
   }
   // 0. create render proxy property access cache
-  instance.accessCache = {}
+  instance.accessCache = Object.create(null)
   // 1. create public instance / render proxy
   // also mark it raw so it's never observed
   instance.proxy = new Proxy(instance.ctx, PublicInstanceProxyHandlers)
@@ -803,4 +803,8 @@ export function formatComponentName(
   }
 
   return name ? classify(name) : isRoot ? `App` : `Anonymous`
+}
+
+export function isClassComponent(value: unknown): value is ClassComponent {
+  return isFunction(value) && '__vccOpts' in value
 }
